@@ -10,7 +10,12 @@ import pytest
 
 from atomic_swap_cli.models import InvalidTransition, SwapState
 from atomic_swap_cli.store import SwapStore
-from atomic_swap_cli.swap_service import SwapService, sha256_hex
+from atomic_swap_cli.swap_service import (
+    DEFAULT_CLTV_INITIATOR,
+    DEFAULT_CLTV_RESPONDER,
+    SwapService,
+    sha256_hex,
+)
 
 
 @dataclass
@@ -287,11 +292,11 @@ def test_check_expiry_detects_initiator_leg_expired(service: SwapService):
         initiator_hold_client=alice_hold,
         current_height=1000,
     )
-    assert swap.expiry_height_initiator == 1000 + 144  # DEFAULT_CLTV_INITIATOR
+    assert swap.expiry_height_initiator == 1000 + DEFAULT_CLTV_INITIATOR
     # Not yet at expiry.
-    assert service.check_expiry(swap, initiator_height=1100) is None
+    assert service.check_expiry(swap, initiator_height=1000 + DEFAULT_CLTV_INITIATOR - 10) is None
     # Past expiry.
-    reason = service.check_expiry(swap, initiator_height=1144)
+    reason = service.check_expiry(swap, initiator_height=1000 + DEFAULT_CLTV_INITIATOR)
     assert reason is not None
     assert "initiator" in reason
 
@@ -319,8 +324,8 @@ def test_check_expiry_detects_responder_leg_expired(service: SwapService):
         responder_hold_client=bob_hold,
         current_height=500,
     )
-    assert swap.expiry_height_responder == 500 + 72  # DEFAULT_CLTV_RESPONDER
-    reason = service.check_expiry(swap, responder_height=572)
+    assert swap.expiry_height_responder == 500 + DEFAULT_CLTV_RESPONDER
+    reason = service.check_expiry(swap, responder_height=500 + DEFAULT_CLTV_RESPONDER)
     assert reason is not None
     assert "responder" in reason
 

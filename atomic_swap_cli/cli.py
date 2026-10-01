@@ -346,7 +346,8 @@ def monitor(swap_id: str) -> None:
 
 @cli.command()
 @click.option("--swap-id", required=True)
-def settle(swap_id: str) -> None:
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if the settling node is on mainnet.")
+def settle(swap_id: str, yes_mainnet: bool) -> None:
     """Release the preimage for a swap (initiator side) to settle both legs."""
     with _store() as store:
         service = SwapService(store)
@@ -355,6 +356,7 @@ def settle(swap_id: str) -> None:
             click.echo(f"no such swap: {swap_id}", err=True)
             sys.exit(1)
         node_name = swap.initiator_node
+        _confirm_real_money(node_name, yes_mainnet=yes_mainnet)
         hold_client = _hold_client_for(node_name)
         swap = service.settle(swap, hold_client)
         click.echo(f"swap {swap_id} settled; preimage: {swap.preimage}")
@@ -363,7 +365,8 @@ def settle(swap_id: str) -> None:
 @cli.command("settle-with-preimage")
 @click.option("--swap-id", required=True)
 @click.option("--preimage", required=True, help="preimage observed from the completed outgoing payment")
-def settle_with_preimage(swap_id: str, preimage: str) -> None:
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if the settling node is on mainnet.")
+def settle_with_preimage(swap_id: str, preimage: str, yes_mainnet: bool) -> None:
     """Responder-side settle: release the responder's own hold invoice
     using a preimage learned from the network (e.g. the
     `payment_preimage` printed by `pay` once the initiator settles their
@@ -375,6 +378,7 @@ def settle_with_preimage(swap_id: str, preimage: str) -> None:
             click.echo(f"no such swap: {swap_id}", err=True)
             sys.exit(1)
         node_name = swap.responder_node
+        _confirm_real_money(node_name, yes_mainnet=yes_mainnet)
         hold_client = _hold_client_for(node_name)
         swap = service.settle_with_preimage(swap, preimage, hold_client)
         click.echo(f"swap {swap_id} settled; preimage: {swap.preimage}")
@@ -383,7 +387,8 @@ def settle_with_preimage(swap_id: str, preimage: str) -> None:
 @cli.command()
 @click.option("--swap-id", required=True)
 @click.option("--reason", default="timeout")
-def refund(swap_id: str, reason: str) -> None:
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if the refunding node is on mainnet.")
+def refund(swap_id: str, reason: str, yes_mainnet: bool) -> None:
     """Cancel a swap's hold invoice (timeout/refund path)."""
     with _store() as store:
         service = SwapService(store)
@@ -392,6 +397,7 @@ def refund(swap_id: str, reason: str) -> None:
             click.echo(f"no such swap: {swap_id}", err=True)
             sys.exit(1)
         node_name = swap.initiator_node if swap.role.value == "initiator" else swap.responder_node
+        _confirm_real_money(node_name, yes_mainnet=yes_mainnet)
         hold_client = _hold_client_for(node_name)
         swap = service.refund(swap, hold_client, reason=reason)
         click.echo(f"swap {swap_id} refunded: {reason}")
@@ -399,7 +405,8 @@ def refund(swap_id: str, reason: str) -> None:
 
 @cli.command("check-timeout")
 @click.option("--swap-id", required=True)
-def check_timeout(swap_id: str) -> None:
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if the auto-refunding node is on mainnet.")
+def check_timeout(swap_id: str, yes_mainnet: bool) -> None:
     """Check whether a swap's CLTV expiry has passed without settlement
     and, if so, automatically refund (cancel) your own hold invoice.
 
@@ -430,6 +437,7 @@ def check_timeout(swap_id: str) -> None:
             return
 
         own_node = swap.initiator_node if swap.role.value == "initiator" else swap.responder_node
+        _confirm_real_money(own_node, yes_mainnet=yes_mainnet)
         hold_client = _hold_client_for(own_node)
         swap, _ = service.auto_refund_if_expired(
             swap, hold_client, initiator_height=initiator_height, responder_height=responder_height

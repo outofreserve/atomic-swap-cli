@@ -340,10 +340,10 @@ python -m atomic_swap_cli.cli --help
 | `accept` | As the responder: create the mirrored hold invoice, locked to the same payment hash, on the other chain. Flag: `--yes-mainnet`. |
 | `pay` | Pay a bolt11 invoice from a given node (used by both sides to lock their HTLC). Blocks until the payment resolves. Flags: `--yes-mainnet`, `--dry-run`. |
 | `monitor` | Poll both hold invoices for a swap and print their state (`UNPAID`/`ACCEPTED`/etc.), including a `BOTH_LOCKED` summary once ready. |
-| `settle` | Initiator only: release the preimage, settling your own hold invoice (this reveals the preimage to the other side's completed `pay`). |
-| `settle-with-preimage` | Responder only: settle your own hold invoice using a preimage learned from your completed outgoing `pay`. |
-| `refund` | Cancel a swap's hold invoice (timeout/refund path) — use if the counterparty never locks their side. |
-| `check-timeout` | Check a swap's recorded CLTV-expiry height against each chain's current height and, if passed, auto-refund (cancel your own hold invoice). Manually-triggered — see [Known limitations](#known-limitations). |
+| `settle` | Initiator only: release the preimage, settling your own hold invoice (this reveals the preimage to the other side's completed `pay`). Flag: `--yes-mainnet`. |
+| `settle-with-preimage` | Responder only: settle your own hold invoice using a preimage learned from your completed outgoing `pay`. Flag: `--yes-mainnet`. |
+| `refund` | Cancel a swap's hold invoice (timeout/refund path) — use if the counterparty never locks their side. Flag: `--yes-mainnet`. |
+| `check-timeout` | Check a swap's recorded CLTV-expiry height against each chain's current height and, if passed, auto-refund (cancel your own hold invoice). Manually-triggered — see [Known limitations](#known-limitations). Flag: `--yes-mainnet`. |
 | `status` | Show full persisted details for one swap by `swap_id`. |
 | `list` | List all known swaps and their current state. |
 

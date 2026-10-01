@@ -92,8 +92,20 @@ def sha256_hex(preimage_hex: str) -> str:
     return hashlib.sha256(bytes.fromhex(preimage_hex)).hexdigest()
 
 
-DEFAULT_CLTV_INITIATOR = 144  # blocks; the initiator's invoice (settled first) gets a longer window
-DEFAULT_CLTV_RESPONDER = 72  # responder's invoice must expire sooner so initiator can safely wait
+DEFAULT_CLTV_INITIATOR = 72  # blocks; the initiator's invoice is settled FIRST (revealing the
+# preimage), so it must expire SOONER than the responder's -- this gives the responder,
+# who can only claim *after* observing the reveal, enough margin before their own
+# invoice's deadline. (Classic atomic-swap safety pattern: the leg that reveals the
+# secret gets the shorter timeout; the leg that reacts to the reveal gets the longer
+# one. Getting this backwards lets the initiator wait for the responder's leg to
+# expire/refund first, then still settle their own leg and steal the responder's funds.)
+DEFAULT_CLTV_RESPONDER = 144  # blocks; must be strictly greater than DEFAULT_CLTV_INITIATOR.
+
+assert DEFAULT_CLTV_RESPONDER > DEFAULT_CLTV_INITIATOR, (
+    "DEFAULT_CLTV_RESPONDER must exceed DEFAULT_CLTV_INITIATOR -- the leg settled "
+    "second (responder's) must outlive the leg settled first (initiator's), or the "
+    "initiator can steal the responder's funds (see comments above)."
+)
 
 
 class SwapService:
