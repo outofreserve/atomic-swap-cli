@@ -256,3 +256,123 @@ def test_fail_transitions_to_failed_with_error(service: SwapService):
     swap = service.fail(swap, "peer disconnected")
     assert swap.state == SwapState.FAILED
     assert swap.error == "peer disconnected"
+
+
+def test_check_expiry_returns_none_without_height_data(service: SwapService):
+    alice_hold = FakeHoldClient("alice-sha256")
+    swap = service.initiate(
+        initiator_chain="sha256",
+        responder_chain="blake2b",
+        initiator_node="alice-sha256",
+        responder_node="bob-blake2b",
+        amount_msat_initiator=1000,
+        amount_msat_responder=1000,
+        initiator_hold_client=alice_hold,
+    )
+    # No current_height was supplied at initiate() time, so no expiry
+    # heights are recorded -- "unknown" must never be treated as expired.
+    assert swap.expiry_height_initiator is None
+    assert service.check_expiry(swap, initiator_height=999_999, responder_height=999_999) is None
+
+
+def test_check_expiry_detects_initiator_leg_expired(service: SwapService):
+    alice_hold = FakeHoldClient("alice-sha256")
+    swap = service.initiate(
+        initiator_chain="sha256",
+        responder_chain="blake2b",
+        initiator_node="alice-sha256",
+        responder_node="bob-blake2b",
+        amount_msat_initiator=1000,
+        amount_msat_responder=1000,
+        initiator_hold_client=alice_hold,
+        current_height=1000,
+    )
+    assert swap.expiry_height_initiator == 1000 + 144  # DEFAULT_CLTV_INITIATOR
+    # Not yet at expiry.
+    assert service.check_expiry(swap, initiator_height=1100) is None
+    # Past expiry.
+    reason = service.check_expiry(swap, initiator_height=1144)
+    assert reason is not None
+    assert "initiator" in reason
+
+
+def test_check_expiry_detects_responder_leg_expired(service: SwapService):
+    alice_hold = FakeHoldClient("alice-sha256")
+    bob_hold = FakeHoldClient("bob-blake2b")
+    swap = service.initiate(
+        initiator_chain="sha256",
+        responder_chain="blake2b",
+        initiator_node="alice-sha256",
+        responder_node="bob-blake2b",
+        amount_msat_initiator=1000,
+        amount_msat_responder=1000,
+        initiator_hold_client=alice_hold,
+    )
+    swap = service.accept(
+        payment_hash=swap.payment_hash,
+        initiator_chain="sha256",
+        responder_chain="blake2b",
+        initiator_node="alice-sha256",
+        responder_node="bob-blake2b",
+        amount_msat_initiator=1000,
+        amount_msat_responder=1000,
+        responder_hold_client=bob_hold,
+        current_height=500,
+    )
+    assert swap.expiry_height_responder == 500 + 72  # DEFAULT_CLTV_RESPONDER
+    reason = service.check_expiry(swap, responder_height=572)
+    assert reason is not None
+    assert "responder" in reason
+
+
+def test_check_expiry_ignores_terminal_swap(service: SwapService):
+    alice_hold = FakeHoldClient("alice-sha256")
+    swap = service.initiate(
+        initiator_chain="sha256",
+        responder_chain="blake2b",
+        initiator_node="alice-sha256",
+        responder_node="bob-blake2b",
+        amount_msat_initiator=1000,
+        amount_msat_responder=1000,
+        initiator_hold_client=alice_hold,
+        current_height=1000,
+    )
+    swap = service.refund(swap, alice_hold, reason="manual refund")
+    assert swap.is_terminal()
+    assert service.check_expiry(swap, initiator_height=10_000, responder_height=10_000) is None
+
+
+def test_auto_refund_if_expired_refunds_when_past_expiry(service: SwapService):
+    alice_hold = FakeHoldClient("alice-sha256")
+    swap = service.initiate(
+        initiator_chain="sha256",
+        responder_chain="blake2b",
+        initiator_node="alice-sha256",
+        responder_node="bob-blake2b",
+        amount_msat_initiator=1000,
+        amount_msat_responder=1000,
+        initiator_hold_client=alice_hold,
+        current_height=1000,
+    )
+    swap, reason = service.auto_refund_if_expired(swap, alice_hold, initiator_height=1200)
+    assert reason is not None
+    assert swap.state == SwapState.REFUNDED
+    assert alice_hold.invoices[swap.payment_hash].state == "CANCELLED"
+
+
+def test_auto_refund_if_expired_noop_when_not_expired(service: SwapService):
+    alice_hold = FakeHoldClient("alice-sha256")
+    swap = service.initiate(
+        initiator_chain="sha256",
+        responder_chain="blake2b",
+        initiator_node="alice-sha256",
+        responder_node="bob-blake2b",
+        amount_msat_initiator=1000,
+        amount_msat_responder=1000,
+        initiator_hold_client=alice_hold,
+        current_height=1000,
+    )
+    swap, reason = service.auto_refund_if_expired(swap, alice_hold, initiator_height=1010)
+    assert reason is None
+    assert swap.state == SwapState.INITIATED
+    assert alice_hold.invoices[swap.payment_hash].state == "UNPAID"

@@ -91,6 +91,16 @@ class Swap:
     cltv_expiry_initiator: Optional[int] = None
     cltv_expiry_responder: Optional[int] = None
 
+    # Absolute block heights (on each respective chain) at/after which the
+    # corresponding hold invoice's CLTV delta has elapsed and it's safe to
+    # auto-refund rather than risk the counterparty settling very late and
+    # griefing an on-chain claim. Populated by swap_service when the
+    # current chain height is available at invoice-creation time (see
+    # `cli.py check-timeout`); None if unknown (e.g. regtest without a
+    # supplied height, or a swap persisted before this field existed).
+    expiry_height_initiator: Optional[int] = None
+    expiry_height_responder: Optional[int] = None
+
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     history: list[dict[str, Any]] = field(default_factory=list)

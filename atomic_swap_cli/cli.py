@@ -8,6 +8,7 @@ or see the README for the full walkthrough.
 from __future__ import annotations
 
 import sys
+from typing import Optional
 
 import click
 
@@ -184,6 +185,18 @@ def open_channel(
 # --- swap lifecycle ----------------------------------------------------------
 
 
+def _current_height_best_effort(node_name: str) -> Optional[int]:
+    """Best-effort current block height for `node_name`'s chain, used to
+    compute an absolute CLTV-expiry height for auto-refund purposes.
+    Returns None (rather than raising) if the bitcoind RPC isn't
+    reachable -- a swap can still proceed without a recorded expiry
+    height, it just can't be auto-refunded later via `check-timeout`."""
+    try:
+        return _bitcoin_rpc_for(node_name).getblockcount()
+    except Exception:
+        return None
+
+
 @cli.command()
 @click.option("--initiator-node", required=True, help="e.g. alice-sha256")
 @click.option("--responder-node", required=True, help="e.g. bob-blake2b")
@@ -214,6 +227,7 @@ def initiate(
             amount_msat_initiator=amount_initiator_msat,
             amount_msat_responder=amount_responder_msat,
             initiator_hold_client=hold_client,
+            current_height=_current_height_best_effort(initiator_node),
         )
         _print_swap(swap)
         click.echo("\nGive the payment_hash and initiator invoice above to the counterparty.")
@@ -252,6 +266,7 @@ def accept(
             amount_msat_initiator=amount_initiator_msat,
             amount_msat_responder=amount_responder_msat,
             responder_hold_client=hold_client,
+            current_height=_current_height_best_effort(responder_node),
         )
         _print_swap(swap)
         click.echo("\nGive the responder invoice above back to the initiator to pay.")
@@ -380,6 +395,46 @@ def refund(swap_id: str, reason: str) -> None:
         hold_client = _hold_client_for(node_name)
         swap = service.refund(swap, hold_client, reason=reason)
         click.echo(f"swap {swap_id} refunded: {reason}")
+
+
+@cli.command("check-timeout")
+@click.option("--swap-id", required=True)
+def check_timeout(swap_id: str) -> None:
+    """Check whether a swap's CLTV expiry has passed without settlement
+    and, if so, automatically refund (cancel) your own hold invoice.
+
+    Queries the current block height on both chains via each node's
+    bitcoind RPC; a swap with no recorded expiry height (e.g. one
+    created before this feature existed, or without a reachable
+    bitcoind at `initiate`/`accept` time) is reported as "unknown" and
+    left untouched rather than guessed at."""
+    with _store() as store:
+        service = SwapService(store)
+        swap = store.get(swap_id)
+        if swap is None:
+            click.echo(f"no such swap: {swap_id}", err=True)
+            sys.exit(1)
+        if swap.is_terminal():
+            click.echo(f"swap {swap_id} is already terminal ({swap.state.value}); nothing to check")
+            return
+
+        initiator_height = _current_height_best_effort(swap.initiator_node)
+        responder_height = _current_height_best_effort(swap.responder_node)
+        reason = service.check_expiry(swap, initiator_height=initiator_height, responder_height=responder_height)
+        if reason is None:
+            click.echo(
+                f"swap {swap_id} not expired "
+                f"(initiator_height={initiator_height}, responder_height={responder_height}, "
+                f"expiry_initiator={swap.expiry_height_initiator}, expiry_responder={swap.expiry_height_responder})"
+            )
+            return
+
+        own_node = swap.initiator_node if swap.role.value == "initiator" else swap.responder_node
+        hold_client = _hold_client_for(own_node)
+        swap, _ = service.auto_refund_if_expired(
+            swap, hold_client, initiator_height=initiator_height, responder_height=responder_height
+        )
+        click.echo(f"swap {swap_id} auto-refunded: {reason}")
 
 
 @cli.command("list")

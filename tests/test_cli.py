@@ -318,3 +318,84 @@ def test_open_channel_accept_fund_safety_risk_overrides_block(isolated_db, fake_
     assert result.exit_code == 0, result.output
     assert "channel funded" in result.output
 
+
+
+def test_check_timeout_not_expired(isolated_db, fake_clients, monkeypatch):
+    rpc = MagicMock()
+    rpc.getblockcount.return_value = 1010
+    monkeypatch.setattr(cli_module, "_bitcoin_rpc_for", lambda name: rpc)
+
+    initiate_result = run(
+        "initiate",
+        "--initiator-node", "alice-sha256",
+        "--responder-node", "bob-blake2b",
+        "--initiator-chain", "sha256",
+        "--responder-chain", "blake2b",
+        "--amount-initiator-msat", "100000",
+        "--amount-responder-msat", "100000",
+    )
+    swap_id = [
+        line.split()[-1] for line in initiate_result.output.splitlines() if line.startswith("swap_id:")
+    ][0]
+
+    result = run("check-timeout", "--swap-id", swap_id)
+    assert result.exit_code == 0, result.output
+    assert "not expired" in result.output
+
+
+def test_check_timeout_auto_refunds_when_expired(isolated_db, fake_clients, monkeypatch):
+    heights = iter([1000])  # height at initiate() time
+
+    def rpc_for(name):
+        rpc = MagicMock()
+        rpc.getblockcount.return_value = next(heights, 1200)
+        return rpc
+
+    monkeypatch.setattr(cli_module, "_bitcoin_rpc_for", rpc_for)
+
+    initiate_result = run(
+        "initiate",
+        "--initiator-node", "alice-sha256",
+        "--responder-node", "bob-blake2b",
+        "--initiator-chain", "sha256",
+        "--responder-chain", "blake2b",
+        "--amount-initiator-msat", "100000",
+        "--amount-responder-msat", "100000",
+    )
+    swap_id = [
+        line.split()[-1] for line in initiate_result.output.splitlines() if line.startswith("swap_id:")
+    ][0]
+
+    result = run("check-timeout", "--swap-id", swap_id)
+    assert result.exit_code == 0, result.output
+    assert "auto-refunded" in result.output
+
+    with SwapStore(isolated_db) as store:
+        swap = store.get(swap_id)
+        assert swap.state.value == "refunded"
+
+
+def test_check_timeout_unknown_swap_errors(isolated_db, fake_clients):
+    result = run("check-timeout", "--swap-id", "nonexistent")
+    assert result.exit_code != 0
+    assert "no such swap" in result.output
+
+
+def test_check_timeout_already_terminal_is_noop(isolated_db, fake_clients):
+    initiate_result = run(
+        "initiate",
+        "--initiator-node", "alice-sha256",
+        "--responder-node", "bob-blake2b",
+        "--initiator-chain", "sha256",
+        "--responder-chain", "blake2b",
+        "--amount-initiator-msat", "100000",
+        "--amount-responder-msat", "100000",
+    )
+    swap_id = [
+        line.split()[-1] for line in initiate_result.output.splitlines() if line.startswith("swap_id:")
+    ][0]
+    run("refund", "--swap-id", swap_id, "--reason", "manual")
+
+    result = run("check-timeout", "--swap-id", swap_id)
+    assert result.exit_code == 0, result.output
+    assert "already terminal" in result.output

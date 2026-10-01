@@ -112,6 +112,7 @@ class SwapService:
         amount_msat_initiator: int,
         amount_msat_responder: int,
         initiator_hold_client: HoldClientProtocol,
+        current_height: Optional[int] = None,
     ) -> Swap:
         preimage = generate_preimage()
         payment_hash = sha256_hex(preimage)
@@ -137,6 +138,7 @@ class SwapService:
             amount_msat_responder=amount_msat_responder,
             initiator_invoice=handle.bolt11,
             cltv_expiry_initiator=DEFAULT_CLTV_INITIATOR,
+            expiry_height_initiator=(current_height + DEFAULT_CLTV_INITIATOR) if current_height is not None else None,
         )
         self.store.save(swap)
         return swap
@@ -154,6 +156,7 @@ class SwapService:
         amount_msat_initiator: int,
         amount_msat_responder: int,
         responder_hold_client: HoldClientProtocol,
+        current_height: Optional[int] = None,
     ) -> Swap:
         """Called on the responder's side: creates the mirrored hold
         invoice for the *same* payment_hash on the responder's chain.
@@ -179,10 +182,12 @@ class SwapService:
             amount_msat_responder=amount_msat_responder,
             responder_invoice=handle.bolt11,
             cltv_expiry_responder=DEFAULT_CLTV_RESPONDER,
+            expiry_height_responder=(current_height + DEFAULT_CLTV_RESPONDER) if current_height is not None else None,
         )
         swap.transition(SwapState.COUNTERPARTY_LOCKED, note="mirrored hold invoice created")
         self.store.save(swap)
         return swap
+
 
     def mark_counterparty_locked(self, swap: Swap, note: str = "counterparty invoice observed") -> Swap:
         """Initiator-side transition: call once the initiator has learned
@@ -276,3 +281,61 @@ class SwapService:
         swap.transition(SwapState.FAILED, note=reason)
         self.store.save(swap)
         return swap
+
+    def check_expiry(
+        self,
+        swap: Swap,
+        *,
+        initiator_height: Optional[int] = None,
+        responder_height: Optional[int] = None,
+    ) -> Optional[str]:
+        """Return a human-readable reason if `swap` has passed either
+        leg's CLTV expiry height and is not yet settled, else None.
+
+        Safe to call on a settled/already-terminal swap or one with no
+        recorded expiry heights (e.g. created before this field existed,
+        or on regtest without a height supplied) -- returns None in
+        those cases rather than raising, since "unknown" must never be
+        treated as "expired".
+        """
+        if swap.is_terminal():
+            return None
+        if (
+            swap.expiry_height_initiator is not None
+            and initiator_height is not None
+            and initiator_height >= swap.expiry_height_initiator
+        ):
+            return (
+                f"initiator leg's CLTV expiry height {swap.expiry_height_initiator} reached "
+                f"(current height {initiator_height}) without settlement"
+            )
+        if (
+            swap.expiry_height_responder is not None
+            and responder_height is not None
+            and responder_height >= swap.expiry_height_responder
+        ):
+            return (
+                f"responder leg's CLTV expiry height {swap.expiry_height_responder} reached "
+                f"(current height {responder_height}) without settlement"
+            )
+        return None
+
+    def auto_refund_if_expired(
+        self,
+        swap: Swap,
+        hold_client: HoldClientProtocol,
+        *,
+        initiator_height: Optional[int] = None,
+        responder_height: Optional[int] = None,
+    ) -> tuple[Swap, Optional[str]]:
+        """Check `check_expiry` and, if expired, refund (cancel the
+        caller's own hold invoice + transition to REFUNDED).
+
+        Returns (swap, reason) -- reason is None if nothing happened
+        (swap not expired, or already terminal).
+        """
+        reason = self.check_expiry(swap, initiator_height=initiator_height, responder_height=responder_height)
+        if reason is None:
+            return swap, None
+        swap = self.refund(swap, hold_client, reason=f"CLTV expiry: {reason}")
+        return swap, reason

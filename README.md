@@ -343,6 +343,7 @@ python -m atomic_swap_cli.cli --help
 | `settle` | Initiator only: release the preimage, settling your own hold invoice (this reveals the preimage to the other side's completed `pay`). |
 | `settle-with-preimage` | Responder only: settle your own hold invoice using a preimage learned from your completed outgoing `pay`. |
 | `refund` | Cancel a swap's hold invoice (timeout/refund path) — use if the counterparty never locks their side. |
+| `check-timeout` | Check a swap's recorded CLTV-expiry height against each chain's current height and, if passed, auto-refund (cancel your own hold invoice). Manually-triggered — see [Known limitations](#known-limitations). |
 | `status` | Show full persisted details for one swap by `swap_id`. |
 | `list` | List all known swaps and their current state. |
 
@@ -549,9 +550,16 @@ tests/                   pytest suite (fully mocked, no live daemons/network req
   the development environment's non-standard `lightningd` build and is
   clearly commented as such in both files; it's irrelevant against a
   stock CLN build or the real `privkeyio/lightning` fork binaries.
-- No real refund-timeout automation is included (`refund` is a manual CLI
-  action) — a production-grade implementation would want automatic
-  CLTV-expiry-driven refunds.
+- CLTV-expiry tracking exists (`initiate`/`accept` record an absolute
+  expiry block height per leg, computed from the chain height at
+  creation time plus the CLTV delta) and `check-timeout --swap-id <id>`
+  will auto-refund (cancel your own hold invoice) once that height has
+  passed. This is still a **manually-triggered check**, not a background
+  daemon — you (or a cron job calling `check-timeout` periodically) must
+  invoke it; nothing runs automatically in the background on its own.
+  Swaps created without a reachable bitcoind at `initiate`/`accept` time
+  have no recorded expiry height and are reported as "unknown" rather
+  than guessed at.
 - The fund-safety check in `safety.py` is best-effort (see
   [above](#the-fund-safety-rule-blake2b-chain-testnet4mainnet-only)) — it
   does not replace reading the upstream `privkeyio/lightning` README.
