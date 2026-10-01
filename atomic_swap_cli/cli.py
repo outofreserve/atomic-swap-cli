@@ -90,7 +90,12 @@ def _print_swap(swap: Swap) -> None:
 
 @click.group()
 def cli() -> None:
-    """Cross-chain atomic swap CLI (simulated Bitcoin (blake2b) <-> Bitcoin (sha256) over CLN hold invoices)."""
+    """Cross-chain atomic swap CLI: Bitcoin (blake2b/BTCB2) <-> Bitcoin (sha256) over CLN hold invoices.
+
+    Supports regtest (local dev-mode, no real funds), testnet4 (real
+    public network, worthless coins), and mainnet (REAL FUNDS -- see
+    README.md's risk disclaimer; mainnet commands require --yes-mainnet).
+    """
 
 
 # --- channel management ----------------------------------------------------
