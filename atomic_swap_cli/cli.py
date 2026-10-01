@@ -16,6 +16,7 @@ from .bitcoin_rpc import BitcoinRpcClient
 from .cln_rpc import ClnRpcClient
 from .hold_client import HoldClient
 from .models import Swap, SwapState
+from .safety import FundSafetyError, check_utxo_post_activation
 from .store import SwapStore
 from .swap_service import SwapService, sha256_hex
 
@@ -34,6 +35,40 @@ def _cln_client_for(node_name: str) -> ClnRpcClient:
     node = config.node(node_name)
     socket_path = node.lightning_dir / node.network / "lightning-rpc"
     return ClnRpcClient(socket_path)
+
+
+def _bitcoin_rpc_for(node_name: str) -> BitcoinRpcClient:
+    return BitcoinRpcClient(config.node(node_name).bitcoin)
+
+
+def _confirm_real_money(*node_names: str, yes_mainnet: bool) -> None:
+    """Guardrail: refuse to touch any mainnet (real funds) node unless the
+    caller passed --yes-mainnet. Always prints a warning banner for any
+    real-network (mainnet or testnet4) node involved so it's never
+    ambiguous whether a command is touching a real network."""
+    nodes = [config.node(n) for n in node_names]
+    mainnet_nodes = [n for n in nodes if n.network_profile is config.NetworkProfile.MAINNET]
+    testnet_nodes = [n for n in nodes if n.network_profile is config.NetworkProfile.TESTNET4]
+
+    if mainnet_nodes and not yes_mainnet:
+        click.echo("REFUSING: this command touches MAINNET node(s) with REAL FUNDS:", err=True)
+        for n in mainnet_nodes:
+            click.echo(f"  - {n.label}  (chain: {n.bitcoin.label})", err=True)
+        click.echo(
+            "\nThis project drives Bitcoin mainnet alongside the Bitcoin Knots "
+            "BLAKE2b fork (BTCB2) and the privkeyio/lightning fork -- both "
+            "EXPERIMENTAL, UNAUDITED software per their own READMEs. Bugs here, "
+            "in those forks, or in how you use this CLI can lose real money "
+            "irreversibly.\n\nRe-run with --yes-mainnet only once you have read "
+            "README.md's risk disclosure and understand/accept this risk.",
+            err=True,
+        )
+        sys.exit(2)
+
+    for n in mainnet_nodes:
+        click.echo(f"\u26a0\ufe0f  MAINNET (REAL FUNDS): {n.label} on {n.bitcoin.label}")
+    for n in testnet_nodes:
+        click.echo(f"(testnet4, worthless coins: {n.label} on {n.bitcoin.label})")
 
 
 def _print_swap(swap: Swap) -> None:
@@ -65,8 +100,71 @@ def cli() -> None:
 @click.option("--from-node", required=True, help="Funding node name, e.g. alice-sha256")
 @click.option("--to-node", required=True, help="Peer node name, e.g. bob-sha256")
 @click.option("--amount-sat", default=1_000_000, show_default=True, type=int)
-def open_channel(from_node: str, to_node: str, amount_sat: int) -> None:
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if either node is on mainnet.")
+@click.option("--dry-run", is_flag=True, help="Show what would happen (incl. estimated fee) without broadcasting.")
+@click.option(
+    "--accept-fund-safety-risk",
+    is_flag=True,
+    help=(
+        "Override the blake2b-chain post-activation funding-UTXO check. "
+        "Only use this if you have manually verified your funding coins "
+        "per the privkeyio/lightning README -- see safety.py/README.md."
+    ),
+)
+def open_channel(
+    from_node: str, to_node: str, amount_sat: int, yes_mainnet: bool, dry_run: bool, accept_fund_safety_risk: bool
+) -> None:
     """Connect + fund a channel between two lightning nodes on the same chain."""
+    _confirm_real_money(from_node, to_node, yes_mainnet=yes_mainnet)
+    from_cfg = config.node(from_node)
+
+    if from_cfg.network_profile in config.REAL_NETWORK_PROFILES:
+        # Fee estimate before broadcasting anything on a real network.
+        try:
+            fee_est = _bitcoin_rpc_for(from_node).estimatesmartfee(6)
+            if "feerate" in fee_est:
+                click.echo(f"estimated feerate (~6 blocks): {fee_est['feerate']} BTC/kvB")
+            else:
+                click.echo(f"fee estimate unavailable: {fee_est}")
+        except Exception as exc:  # pragma: no cover - live-network only
+            click.echo(f"fee estimate unavailable: {exc}")
+
+        # Fund-safety check: on the blake2b chain, refuse to fund from
+        # pre-activation coins unless explicitly overridden. CLN auto-
+        # selects UTXOs, so we check every confirmed, unreserved output
+        # currently in the funding node's wallet.
+        if from_cfg.bitcoin.chain_kind is config.ChainKind.BLAKE2B and not accept_fund_safety_risk:
+            funder = _cln_client_for(from_node)
+            rpc = _bitcoin_rpc_for(from_node)
+            outputs = funder.listfunds().get("outputs", [])
+            unsafe = []
+            for out in outputs:
+                if out.get("reserved") or out.get("status") != "confirmed":
+                    continue
+                try:
+                    result = check_utxo_post_activation(rpc, from_cfg.bitcoin, out["txid"], out["output"])
+                except FundSafetyError as exc:
+                    unsafe.append(str(exc))
+                    continue
+                if not result.is_safe:
+                    unsafe.append(f"{out['txid']}:{out['output']} -- {result.reason}")
+            if unsafe:
+                click.echo("REFUSING to fund: wallet holds pre-activation coin(s) on the blake2b chain:", err=True)
+                for line in unsafe:
+                    click.echo(f"  - {line}", err=True)
+                click.echo(
+                    "\nFunding a blake2b-chain channel with pre-activation coins reopens "
+                    "the replay/signature exposure the unified-sig scheme prevents. "
+                    "Re-run with --accept-fund-safety-risk only if you have manually "
+                    "verified this is safe (see README.md).",
+                    err=True,
+                )
+                sys.exit(2)
+
+    if dry_run:
+        click.echo(f"[dry-run] would connect {from_node} -> {to_node} and fund a {amount_sat} sat channel")
+        return
+
     funder = _cln_client_for(from_node)
     peer = _cln_client_for(to_node)
     peer_info = peer.getinfo()
@@ -88,6 +186,7 @@ def open_channel(from_node: str, to_node: str, amount_sat: int) -> None:
 @click.option("--responder-chain", required=True, help="e.g. blake2b")
 @click.option("--amount-initiator-msat", required=True, type=int, help="amount initiator receives on their chain")
 @click.option("--amount-responder-msat", required=True, type=int, help="amount responder receives on their chain")
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if either node is on mainnet.")
 def initiate(
     initiator_node: str,
     responder_node: str,
@@ -95,8 +194,10 @@ def initiate(
     responder_chain: str,
     amount_initiator_msat: int,
     amount_responder_msat: int,
+    yes_mainnet: bool,
 ) -> None:
     """Initiate a swap: generate the secret and create the first hold invoice."""
+    _confirm_real_money(initiator_node, responder_node, yes_mainnet=yes_mainnet)
     with _store() as store:
         service = SwapService(store)
         hold_client = _hold_client_for(initiator_node)
@@ -121,6 +222,7 @@ def initiate(
 @click.option("--responder-chain", required=True)
 @click.option("--amount-initiator-msat", required=True, type=int)
 @click.option("--amount-responder-msat", required=True, type=int)
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if either node is on mainnet.")
 def accept(
     payment_hash: str,
     responder_node: str,
@@ -129,8 +231,10 @@ def accept(
     responder_chain: str,
     amount_initiator_msat: int,
     amount_responder_msat: int,
+    yes_mainnet: bool,
 ) -> None:
     """Accept a swap as the counterparty: create the mirrored hold invoice."""
+    _confirm_real_money(initiator_node, responder_node, yes_mainnet=yes_mainnet)
     with _store() as store:
         service = SwapService(store)
         hold_client = _hold_client_for(responder_node)
@@ -151,9 +255,16 @@ def accept(
 @cli.command("pay")
 @click.option("--from-node", required=True, help="the node making the payment")
 @click.option("--bolt11", required=True)
-def pay(from_node: str, bolt11: str) -> None:
+@click.option("--yes-mainnet", is_flag=True, help="Required to proceed if the node is on mainnet.")
+@click.option("--dry-run", is_flag=True, help="Decode and show the invoice without paying it.")
+def pay(from_node: str, bolt11: str, yes_mainnet: bool, dry_run: bool) -> None:
     """Pay a bolt11 invoice from the given node (used by both sides to lock HTLCs)."""
+    _confirm_real_money(from_node, yes_mainnet=yes_mainnet)
     cln_client = _cln_client_for(from_node)
+    if dry_run:
+        decoded = cln_client.decode(bolt11)
+        click.echo(f"[dry-run] would pay {decoded.get('amount_msat')} msat to payment_hash={decoded.get('payment_hash')}")
+        return
     result = cln_client.pay(bolt11)
     click.echo(f"payment status: {result.get('status', 'unknown')}")
     if "payment_preimage" in result:

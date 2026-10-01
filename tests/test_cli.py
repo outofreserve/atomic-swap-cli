@@ -3,6 +3,7 @@ out so nothing here touches a live bitcoind/lightningd/hold process.
 """
 from dataclasses import dataclass
 from typing import Optional
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -52,6 +53,7 @@ class FakeHoldClient:
 class FakeClnClient:
     def __init__(self, name: str):
         self.name = name
+        self.funds_outputs: list[dict] = []
 
     def pay(self, bolt11, amount_msat=None):
         return {"status": "complete", "payment_preimage": "00" * 32}
@@ -64,6 +66,12 @@ class FakeClnClient:
 
     def fundchannel(self, node_id, amount_sat):
         return {"txid": "deadbeef"}
+
+    def decode(self, bolt11):
+        return {"amount_msat": 1000, "payment_hash": "ab" * 32}
+
+    def listfunds(self):
+        return {"outputs": self.funds_outputs}
 
 
 @pytest.fixture
@@ -207,3 +215,106 @@ def test_open_channel_command(isolated_db, fake_clients):
     result = run("open-channel", "--from-node", "alice-sha256", "--to-node", "bob-sha256", "--amount-sat", "500000")
     assert result.exit_code == 0, result.output
     assert "channel funded" in result.output
+
+
+def test_mainnet_command_refused_without_confirmation_flag(isolated_db, fake_clients):
+    result = run("pay", "--from-node", "bob-sha256-mainnet", "--bolt11", "lnbcrt1234")
+    assert result.exit_code != 0
+    assert "REFUSING" in result.output
+    assert "MAINNET" in result.output
+
+
+def test_mainnet_command_proceeds_with_confirmation_flag(isolated_db, fake_clients):
+    result = run("pay", "--from-node", "bob-sha256-mainnet", "--bolt11", "lnbcrt1234", "--yes-mainnet")
+    assert result.exit_code == 0, result.output
+    assert "MAINNET (REAL FUNDS)" in result.output
+    assert "payment status: complete" in result.output
+
+
+def test_pay_dry_run_does_not_pay(isolated_db, fake_clients):
+    result = run("pay", "--from-node", "alice-sha256", "--bolt11", "lnbcrt1234", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "[dry-run]" in result.output
+    assert "payment status" not in result.output
+
+
+def test_open_channel_dry_run_does_not_fund(isolated_db, fake_clients, monkeypatch):
+    rpc = MagicMock()
+    rpc.estimatesmartfee.return_value = {"feerate": 0.0001}
+    monkeypatch.setattr(cli_module, "_bitcoin_rpc_for", lambda name: rpc)
+    result = run(
+        "open-channel",
+        "--from-node", "alice-sha256-testnet4",
+        "--to-node", "bob-sha256-testnet4",
+        "--amount-sat", "500000",
+        "--dry-run",
+    )
+    assert result.exit_code == 0, result.output
+    assert "[dry-run]" in result.output
+    assert "channel funded" not in result.output
+
+
+def test_open_channel_blocks_blake2b_pre_activation_funding(isolated_db, fake_clients, monkeypatch):
+    rpc = MagicMock()
+    rpc.estimatesmartfee.return_value = {"feerate": 0.0001}
+    rpc.gettxout.return_value = {"confirmations": 5}
+    rpc.getblockcount.return_value = 961_642  # height 961_638, pre-activation
+    monkeypatch.setattr(cli_module, "_bitcoin_rpc_for", lambda name: rpc)
+
+    from_client = fake_clients["cln"].setdefault("alice-blake2b-mainnet", FakeClnClient("alice-blake2b-mainnet"))
+    from_client.funds_outputs = [{"txid": "ab" * 32, "output": 0, "status": "confirmed", "reserved": False}]
+
+    result = run(
+        "open-channel",
+        "--from-node", "alice-blake2b-mainnet",
+        "--to-node", "bob-blake2b-mainnet",
+        "--amount-sat", "500000",
+        "--yes-mainnet",
+    )
+    assert result.exit_code != 0
+    assert "pre-activation" in result.output
+    assert "channel funded" not in result.output
+
+
+def test_open_channel_allows_blake2b_post_activation_funding(isolated_db, fake_clients, monkeypatch):
+    rpc = MagicMock()
+    rpc.estimatesmartfee.return_value = {"feerate": 0.0001}
+    rpc.gettxout.return_value = {"confirmations": 1}
+    rpc.getblockcount.return_value = 961_641  # post-activation
+    monkeypatch.setattr(cli_module, "_bitcoin_rpc_for", lambda name: rpc)
+
+    from_client = fake_clients["cln"].setdefault("alice-blake2b-mainnet", FakeClnClient("alice-blake2b-mainnet"))
+    from_client.funds_outputs = [{"txid": "ab" * 32, "output": 0, "status": "confirmed", "reserved": False}]
+
+    result = run(
+        "open-channel",
+        "--from-node", "alice-blake2b-mainnet",
+        "--to-node", "bob-blake2b-mainnet",
+        "--amount-sat", "500000",
+        "--yes-mainnet",
+    )
+    assert result.exit_code == 0, result.output
+    assert "channel funded" in result.output
+
+
+def test_open_channel_accept_fund_safety_risk_overrides_block(isolated_db, fake_clients, monkeypatch):
+    rpc = MagicMock()
+    rpc.estimatesmartfee.return_value = {"feerate": 0.0001}
+    rpc.gettxout.return_value = {"confirmations": 5}
+    rpc.getblockcount.return_value = 961_642  # pre-activation
+    monkeypatch.setattr(cli_module, "_bitcoin_rpc_for", lambda name: rpc)
+
+    from_client = fake_clients["cln"].setdefault("alice-blake2b-mainnet", FakeClnClient("alice-blake2b-mainnet"))
+    from_client.funds_outputs = [{"txid": "ab" * 32, "output": 0, "status": "confirmed", "reserved": False}]
+
+    result = run(
+        "open-channel",
+        "--from-node", "alice-blake2b-mainnet",
+        "--to-node", "bob-blake2b-mainnet",
+        "--amount-sat", "500000",
+        "--yes-mainnet",
+        "--accept-fund-safety-risk",
+    )
+    assert result.exit_code == 0, result.output
+    assert "channel funded" in result.output
+

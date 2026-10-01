@@ -96,3 +96,6 @@ class ClnRpcClient:
     def listinvoices(self, label: str | None = None) -> dict:
         params = {"label": label} if label else {}
         return self.call("listinvoices", params)
+
+    def listfunds(self) -> dict:
+        return self.call("listfunds")
